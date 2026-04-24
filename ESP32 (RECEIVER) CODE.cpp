@@ -1,86 +1,134 @@
+#include <WiFi.h>
+#include <esp_now.h>
 #include <ESP32Servo.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+
+// -------- LCD --------
+LiquidCrystal_I2C lcd(0x3F, 16, 2);
 
 // -------- SERVOS --------
 Servo servo1;
 Servo servo2;
 
-// -------- LCD --------
-LiquidCrystal_I2C lcd(0x3F, 16, 2);
-
 // -------- ULTRASONIC --------
-#define TRIG_PIN 5
-#define ECHO_PIN 18
+#define TRIG 5
+#define ECHO 18
 
-long duration;
-float distance;
+// -------- DATA STRUCT --------
+typedef struct struct_message {
+  int id;   // dummy (from transmitter)
+} struct_message;
+
+struct_message incomingData;
+
+// -------- VARIABLES --------
+int bestAngle = 0;
+int bestRSSI = -100;
+
+// -------- RECEIVE CALLBACK (UPDATED FOR ESP32 v3.x) --------
+void OnDataRecv(const esp_now_recv_info *info, const uint8_t *incomingDataRaw, int len) {
+  memcpy(&incomingData, incomingDataRaw, sizeof(incomingData));
+
+  Serial.print("Packet received from: ");
+  for (int i = 0; i < 6; i++) {
+    Serial.printf("%02X", info->src_addr[i]);
+    if (i < 5) Serial.print(":");
+  }
+  Serial.println();
+}
 
 void setup() {
   Serial.begin(115200);
 
-  // -------- SERVO SETUP --------
-  ESP32PWM::allocateTimer(0);
-  ESP32PWM::allocateTimer(1);
-  ESP32PWM::allocateTimer(2);
-  ESP32PWM::allocateTimer(3);
+  // WiFi mode
+  WiFi.mode(WIFI_STA);
 
-  servo1.setPeriodHertz(50);
-  servo2.setPeriodHertz(50);
+  // ESP-NOW init
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW Init Failed");
+    return;
+  }
 
-  servo1.attach(12, 500, 2400); // Azimuth
-  servo2.attach(13, 500, 2400); // Elevation
+  esp_now_register_recv_cb(OnDataRecv);
 
-  // -------- ULTRASONIC SETUP --------
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
+  // -------- SERVO SETUP (SAFE PINS) --------
+  servo1.attach(25);
+  servo2.attach(26);
 
-  // -------- LCD SETUP --------
+  // -------- ULTRASONIC --------
+  pinMode(TRIG, OUTPUT);
+  pinMode(ECHO, INPUT);
+
+  // -------- LCD --------
   lcd.init();
   lcd.backlight();
-
-  lcd.setCursor(0, 0);
-  lcd.print("System Starting");
-  delay(2000);
+  lcd.print("Scanning...");
+  delay(1500);
   lcd.clear();
 }
 
 void loop() {
 
-  // -------- SERVO SWEEP --------
-  for (int angle = 0; angle <= 180; angle += 30) {
+  bestRSSI = -100;
 
+  for (int angle = 0; angle <= 180; angle++) {
+
+    // Move servos
     servo1.write(angle);
     servo2.write(180 - angle);
 
-    // -------- ULTRASONIC READ --------
-    digitalWrite(TRIG_PIN, LOW);
+    delay(100); // stabilization
+
+    // -------- GET RSSI --------
+    int rssi = WiFi.RSSI();
+
+    // -------- ULTRASONIC --------
+    digitalWrite(TRIG, LOW);
     delayMicroseconds(2);
 
-    digitalWrite(TRIG_PIN, HIGH);
+    digitalWrite(TRIG, HIGH);
     delayMicroseconds(10);
-    digitalWrite(TRIG_PIN, LOW);
+    digitalWrite(TRIG, LOW);
 
-    duration = pulseIn(ECHO_PIN, HIGH, 30000);
-    distance = duration * 0.034 / 2;
+    long duration = pulseIn(ECHO, HIGH, 30000);
+    float distance = duration * 0.034 / 2;
+
+    // -------- TRACK BEST ANGLE --------
+    if (rssi > bestRSSI) {
+      bestRSSI = rssi;
+      bestAngle = angle;
+    }
 
     // -------- SERIAL OUTPUT --------
-    Serial.print("Angle: ");
     Serial.print(angle);
-    Serial.print(" | Distance: ");
-    Serial.print(distance);
-    Serial.println(" cm");
+    Serial.print(":");
+    Serial.print(rssi);
+    Serial.print(":");
+    Serial.println(distance);
 
     // -------- LCD DISPLAY --------
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("Ang:");
+    lcd.print("A:");
     lcd.print(angle);
+    lcd.print(" R:");
+    lcd.print(rssi);
 
     lcd.setCursor(0, 1);
-    lcd.print("Dist:");
+    lcd.print("D:");
     lcd.print(distance);
-
-    delay(1000);
   }
+
+  // -------- MOVE TO BEST ANGLE --------
+  servo1.write(bestAngle);
+  servo2.write(180 - bestAngle);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("BEST ANGLE:");
+  lcd.setCursor(0, 1);
+  lcd.print(bestAngle);
+
+  delay(10000);
 }
